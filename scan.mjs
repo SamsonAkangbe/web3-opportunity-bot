@@ -18,16 +18,20 @@ async function getJson(url, headers = {}) {
 }
 
 // ---- minimal RSS/Atom parser (no dependencies) ----
-function decode(s = "") {
-  return s
-    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
-    .replace(/&amp;/g, "&")
+const entities = (s) =>
+  s
+    .replace(/&nbsp;/g, " ")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
-    .replace(/&#039;|&#39;/g, "'")
-    .replace(/<[^>]+>/g, "")
-    .trim();
+    .replace(/&#0?39;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/&amp;/g, "&");
+
+// Decodes twice because some feeds double-encode (e.g. "&amp;nbsp;"), with tags stripped in between.
+function decode(s = "") {
+  const raw = s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1");
+  return entities(entities(raw).replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim();
 }
 
 function tag(block, name) {
@@ -45,13 +49,18 @@ function parseFeed(xml, category, source) {
     }
     const dateStr = tag(it, "pubDate") || tag(it, "published") || tag(it, "updated");
     const parsed = dateStr ? Date.parse(dateStr) : NaN;
+    const title = tag(it, "title") || tag(it, "description").slice(0, 140);
+    let extra = tag(it, "description").slice(0, 160);
+    // Many feeds (e.g. Google News) just repeat the headline as the description: drop the repeat.
+    const letters = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 40);
+    if (!extra || letters(extra) === letters(title)) extra = "";
     return {
       category,
-      title: tag(it, "title") || tag(it, "description").slice(0, 140),
+      title,
       url: link,
       source,
       date: Number.isFinite(parsed) ? parsed : Date.now(),
-      extra: tag(it, "description").slice(0, 160),
+      extra,
     };
   });
 }
@@ -383,7 +392,6 @@ async function sendNtfy(topic, notifications) {
     await sleep(400);
   }
 }
-
 // ---- main ----
 async function runScan({ dryRun = false } = {}) {
   const topic = process.env.NTFY_TOPIC;
@@ -410,3 +418,4 @@ async function runScan({ dryRun = false } = {}) {
 
 const result = await runScan({ dryRun: process.env.DRY_RUN === "1" });
 console.log(JSON.stringify(result, null, 2));
+    

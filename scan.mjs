@@ -182,6 +182,9 @@ const reddit = () => many(SUBREDDITS.map((s) => [`https://www.reddit.com/r/${s}/
 const X_QUERIES = [
   '"submit your wallet"', '"drop your wallet"', '"drop your address"', '"wallet address" giveaway',
   "whitelist giveaway", '"WL spots"', '"free mint"', "airdrop wallet", "retroactive airdrop", '"comment your wallet"',
+  "USDT giveaway", "USDC giveaway", '"token giveaway"', '"drop your SOL address"', '"drop your ETH address"',
+  '"reply with your wallet"', '"retweet to win" USDT', '"airdrop" "like and retweet"', '"claim your airdrop"',
+  '"wallet submission"', ...(process.env.X_EXTRA_QUERIES || "").split("|").map((s) => s.trim()).filter(Boolean),
 ];
 
 function toXUrl(link) {
@@ -219,26 +222,43 @@ async function xViaNitter() {
 async function xViaApi() {
   const token = process.env.X_BEARER_TOKEN;
   if (!token) return [];
-  try {
-    const q = `(${X_QUERIES.join(" OR ")}) -is:retweet lang:en`;
-    const start = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
-    const url =
-      `https://api.x.com/2/tweets/search/recent?query=${encodeURIComponent(q)}&max_results=100` +
-      `&start_time=${start}&tweet.fields=created_at&expansions=author_id&user.fields=username`;
-    const data = await getJson(url, { Authorization: `Bearer ${token}` });
-    const users = Object.fromEntries((data.includes?.users || []).map((u) => [u.id, u.username]));
-    return (data.data || []).map((t) => ({
-      category: "lead",
-      title: t.text.replace(/\s+/g, " ").slice(0, 220),
-      url: `https://x.com/${users[t.author_id] || "i"}/status/${t.id}`,
-      source: "X",
-      date: Date.parse(t.created_at),
-      extra: "",
-    }));
-  } catch (e) {
-    errs.push(`X API: ${e.message}`);
-    return [];
+  // X limits query length, so the query list is split into several requests of under ~400 characters.
+  const batches = [];
+  let cur = [];
+  for (const q of X_QUERIES) {
+    if ([...cur, q].join(" OR ").length > 400) {
+      batches.push(cur);
+      cur = [];
+    }
+    cur.push(q);
   }
+  if (cur.length) batches.push(cur);
+
+  const start = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+  const out = [];
+  for (const b of batches) {
+    try {
+      const q = `(${b.join(" OR ")}) -is:retweet lang:en`;
+      const url =
+        `https://api.x.com/2/tweets/search/recent?query=${encodeURIComponent(q)}&max_results=100` +
+        `&start_time=${start}&tweet.fields=created_at&expansions=author_id&user.fields=username`;
+      const data = await getJson(url, { Authorization: `Bearer ${token}` });
+      const users = Object.fromEntries((data.includes?.users || []).map((u) => [u.id, u.username]));
+      for (const t of data.data || []) {
+        out.push({
+          category: "lead",
+          title: t.text.replace(/\s+/g, " ").slice(0, 220),
+          url: `https://x.com/${users[t.author_id] || "i"}/status/${t.id}`,
+          source: "X",
+          date: Date.parse(t.created_at),
+          extra: "",
+        });
+      }
+    } catch (e) {
+      errs.push(`X API: ${e.message}`);
+    }
+  }
+  return out;
 }
 
 const x = async () => [...(await xViaApi()), ...(await xViaNitter())];
@@ -246,6 +266,13 @@ const x = async () => [...(await xViaApi()), ...(await xViaNitter())];
 // ---- Anything else you want: EXTRA_FEEDS="https://site1/feed,https://site2/rss" ----
 const extraFeeds = () =>
   many((process.env.EXTRA_FEEDS || "").split(",").map((s) => s.trim()).filter(Boolean).map((u) => [u, "lead", new URL(u).hostname]));
+
+// X only (used by the dedicated X scanner workflow).
+async function collectX() {
+  errs.length = 0;
+  const items = await x();
+  return { items, errors: [...errs] };
+}
 
 async function collectAll() {
   errs.length = 0;
@@ -263,7 +290,7 @@ async function collectAll() {
 // Classify, filter to fresh items, score, and group. Nothing relevant is capped or dropped.
 
 const SUBMIT_RE =
-  /(submit|drop|comment|reply|share|send|enter|post|leave|fill)\b[^.\n]{0,30}\b(wallet|address|0x\w*|\.eth|\.sol)|wallet (submission|collection|drop|list)|collecting wallets|\bwl\b|whitelist|allowlist|guaranteed (mint|spot|wl|allocation)|giveaway|waitlist|early access|\bog role|snapshot/i;
+  /(submit|drop|comment|reply|share|send|enter|post|leave|fill)\b[^.\n]{0,30}\b(wallet|address|0x\w*|\.eth|\.sol)|wallet (submission|collection|drop|list)|collecting wallets|\bwl\b|whitelist|allowlist|guaranteed (mint|spot|wl|allocation)|giveaway|waitlist|early access|\bog role|snapshot|(retweet|\brt\b) to win|\bwin\b[^.\n]{0,20}(usdt|usdc|\$\d)|(usdt|usdc)[^.\n]{0,25}(giveaway|airdrop|winners?)/i;
 const AIRDROP_RE = /airdrop|retroactive|claim|token (launch|generation)|\btge\b|points program|season \d/i;
 const NFT_RE = /\bmint|nft|collection|pfp/i;
 const BOUNTY_RE = /grant|bounty|hackathon|ambassador|quest|campaign|reward|prize|testnet|incentiv/i;
